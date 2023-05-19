@@ -1,0 +1,9 @@
+# log files
+log/
+
+# tmp file
+req
+# compiled thing
+prog
+# flag.txt file
+flag*
