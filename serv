@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+
+# set -x
+
+if [ -f ${PWD}/serv ]; then
+	DIR_BASE="${PWD}"
+elif [ -f "${PWD}/../serv" ]; then
+	DIR_BASE="${PWD}/.."
+elif [ -f "${PWD}/../../serv" ]; then
+	DIR_BASE="${PWD}/../.."
+fi
+
+LOG_PREFIX="Chall_"
+
+R="\x1b[31m"
+G="\x1b[32m"
+B="\x1b[34m"
+Y="\x1b[33m"
+RST="\x1b[0m"
+
+H_INFO="[${B}*${RST}]"
+H_WARN="[${Y}!${RST}]"
+H_FAIL="[${R}-${RST}]"
+H_PASS="[${G}+${RST}]"
+
+function	print::format()
+{
+	local	head="${1}"
+	local	msg="${2}"
+	local	ts="[$(date +'%d%m%y%H%M%S%3N')]"
+
+	printf "${head} ${ts} ${msg}\n" >&420
+	printf "${head} ${msg}\n"
+}
+
+function	print::info()
+{
+	local	msg="${@}"
+
+	print::format "${H_INFO}" "${msg}"
+}
+
+function	print::warn()
+{
+	local	msg="${@}"
+
+	print::format "${H_WARN}" "${msg}"
+}
+
+function	print::fail()
+{
+	local	msg="${@}"
+
+	print::format "${H_FAIL}" "${msg}"
+}
+
+function	print::pass()
+{
+	local	msg="${@}"
+
+	print::format "${H_PASS}" "${msg}"
+}
+
+function	serv::kill()
+{
+	local	chall_id="${1}"
+	local	file_id="${2}"
+	local	lock_path="${DIR_BASE}/log/${LOG_PREFIX}${chall_id}.${file_id}.lock"
+	local	h_lock_path="${G}${lock_path/*\/}${RST}"
+	local	current_pid
+
+	[ -f req ] && rm -f req
+	if [ -f "${lock_path}" ]; then
+		current_pid=$(cat "${lock_path}")
+		ps "${current_pid}" 2>/dev/null 1>&2
+		if [ ${?} == "1" ]; then
+			print::warn "zombie ${h_lock_path} removing it"
+		else
+			print::warn "${h_lock_path} it's held by ${R}${current_pid}${RST}, killing it"
+			current_pid+=" $(pgrep -P ${current_pid})"
+			# reverse pid so child killed first, ensure the whole arboresence is
+			# cleaned
+			for pid in $(tac < <(printf "%s\n" ${current_pid})); do
+				kill -15 "${pid}"
+			done
+		fi
+		rm "${lock_path}"
+	else
+		print::info "File ${h_lock_path} not found, abort killing"
+	fi
+}
+
+function	serv::info()
+{
+	local	mode="${1}"
+	local	file="${G}${2}${RST}"
+	local	pid="${B}${3}${RST}"
+	local	port="${R}${4}${RST}"
+
+	case "${mode}" in
+		"file")	mode="${R}File${RST}" ;;
+		"exec")	mode="${R}Exec${RST}" ;;
+		*)		mode="";;
+	esac
+
+	print::pass "${mode} serving ${file}"
+	print::info "    PID  ${pid}"
+	print::info "    PORT ${port}"
+	print::info "    FILE ${file}"
+}
+
+function	serv::file()
+{
+	: "
+	INFO
+		LIB				serv
+		FUNCTION		file
+		DESC			listent on a given port and securely serving a file
+		ARG				[1] chall_id=${1}
+						[2] file=${2}
+	"
+	local	chall_id="${1}"
+	local	file_id="${2}"
+	local	port="$((10000 + (chall_id * 10) + file_id))"
+	local	base="${DIR_BASE}/log/${LOG_PREFIX}${chall_id}.${file_id}"
+	local	file="${3}"
+	local	file_base=${file/*\/}
+
+	[ "${port}" == "10000" ] && return
+	serv::kill "${chall_id}" "${file_id}"
+	cat << EOHEADERS > req
+HTTP/1.1 200 OK
+Content-Type: $(mimetype ${file_base})
+Content-Disposition: attachment; filename=${file_base}
+Content-Length: $(du -b ${file} | cut -f1)
+
+EOHEADERS
+	< ${file} cat >> req
+	printf "file : %s\n" ${file}
+	socat -dd \
+		-lf "${base}.log" \
+		TCP-LISTEN:${port},fork,reuseaddr, \
+		exec:"cat ./req" &
+	echo "${!}" > "${base}.lock"
+	serv::info "file" "${file}" "${!}" "${port}"
+}
+
+function	serv::exec()
+{
+	: "
+	INFO
+		LIB				serv
+		FUNCTION		exec
+		DESC			listent on a given port and securely serving an
+						executable
+		ARG				[1] chall_id=${1}
+						[2] prog=${2}
+	"
+	local	chall_id="${1}"
+	local	file_id="${2}"
+	local	port="$((10000 + (chall_id * 10) + file_id))"
+	local	base="${DIR_BASE}/log/${LOG_PREFIX}${chall_id}.${file_id}"
+	local	prog="${3}"
+
+	[ "${port}" == "10000" ] && return
+	serv::kill "${chall_id}" "${file_id}"
+	socat -dd \
+		-lf "${base}.log" \
+		TCP-LISTEN:${port},su=nobody,fork,reuseaddr \
+		exec:"${PWD}/${prog}" &
+	echo "${!}" > "${base}.lock"
+	serv::info "exec" "${prog}" "${!}" "${port}"
+}
+
+[ -f "${DIR_BASE}/log" ] && rm -f "${DIR_BASE}/log"
+[ ! -d "${DIR_BASE}/log" ] && mkdir -p "${DIR_BASE}/log"
+
+# append stdout and stderr to a log file
+exec 420<> >(cat >> "${DIR_BASE}/log/main.log")
+
+print::info "${R}serv${RST} called with args: ${G}${@}${RST}"
+
+case "${1}" in
+	"serv")
+		shift
+		case "${1}" in
+			"exec") serv::exec "${2}" "${3}" "${4}";;
+			"file") serv::file "${2}" "${3}" "${4}";;
+		esac
+	;;
+	"kill") serv::kill "${2}" "${3}";;
+esac
+
+# closing fd
+exec 420>&-
